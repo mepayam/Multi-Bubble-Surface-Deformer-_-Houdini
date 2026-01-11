@@ -1,0 +1,316 @@
+// Multi-Bubble Surface Deformer - Surface Oriented (Dynamic Tangents)
+// Point Wrangle | Run Over: Points
+// Works on any oriented surface using @N and dynamically calculated tangents
+
+// =========================
+// Parameters
+// =========================
+int   num_bubbles      = chi("num_bubbles");
+float base_radius      = chf("base_radius");
+float base_height      = chf("base_height");
+float falloff          = chf("falloff");
+float surface_tension  = chf("surface_tension");
+float radius_variation = chf("radius_variation");
+float height_variation = chf("height_variation");
+int   seed             = chi("seed");
+
+// Animation parameters
+int   enable_animated  = chi("enable_animated");
+float lifetime         = chf("lifetime");
+float fade_in          = chf("fade_in");
+float fade_out         = chf("fade_out");
+float spawn_area       = chf("spawn_area");
+
+// Growth animation parameters
+int   enable_growth_mode = chi("enable_growth_mode");
+float growth_duration    = chf("growth_duration");
+float min_scale          = chf("min_scale");
+float pop_duration       = chf("pop_duration");
+
+// Ripple parameters
+int   enable_ripples   = chi("enable_ripples");
+float ripple_radius    = chf("ripple_radius");
+float ripple_height    = chf("ripple_height");
+float ripple_duration  = chf("ripple_duration");
+
+// UPDATED ripple controls (concentric rings simultaneously)
+int   num_ripples      = chi("num_ripples");     // 1..N rings
+float ring_spacing     = chf("ring_spacing");    // world units between rings
+float ripple_width_mul = chf("ripple_width");    // multiplier (0.10..0.25 typical)
+float outer_atten      = chf("outer_atten");     // 0..1 (optional)
+
+// Drift parameters
+int   enable_drift     = chi("enable_drift");
+float drift_amount     = chf("drift_amount");
+float drift_speed      = chf("drift_speed");
+
+// =========================
+// Setup
+// =========================
+vector orig_pos    = @P;
+vector orig_normal = normalize(@N);
+
+float total_displacement = 0.0;
+vector blended_normal    = orig_normal;
+float total_weight       = 0.0;
+
+// Geometry bounds
+vector bbox_min  = getbbox_min(0);
+vector bbox_max  = getbbox_max(0);
+vector bbox_size = bbox_max - bbox_min;
+
+// Use largest dimension for spawn scaling
+float max_size = max(max(bbox_size.x, bbox_size.y), bbox_size.z);
+
+// =========================
+// Bubble deformation
+// =========================
+for (int i = 0; i < num_bubbles; i++)
+{
+    float bubble_life    = 1.0;
+    float scale_factor   = 1.0;
+    vector bubble_offset = {0,0,0};
+
+    int cycle = 0;
+    vector bubble_center;
+
+    if (enable_animated)
+    {
+        float current_time = @Time;
+        float time_offset  = fit(rand(i * 13 + seed), 0, 1, 0, lifetime);
+        float total_time   = current_time + time_offset;
+
+        cycle = int(floor(total_time / lifetime));
+        float bubble_time = total_time - float(cycle) * lifetime;
+
+        // Bubble center in bbox (per cycle)
+        float rand_x = fit(rand(i * 3 + seed + cycle * 17), 0, 1, bbox_min.x, bbox_max.x);
+        float rand_y = fit(rand(i * 5 + seed + cycle * 17), 0, 1, bbox_min.y, bbox_max.y);
+        float rand_z = fit(rand(i * 7 + seed + cycle * 17), 0, 1, bbox_min.z, bbox_max.z);
+        bubble_center = set(rand_x, rand_y, rand_z);
+
+        // Drift in 3D space
+        if (enable_drift)
+        {
+            float drift_phase = rand(i * 37 + seed) * 6.28318;
+            float drift_scale = spawn_area * max_size;
+
+            bubble_offset.x = sin(current_time * drift_speed + drift_phase) * drift_amount * drift_scale;
+            bubble_offset.y = sin(current_time * drift_speed * 0.7 + drift_phase + 1.0) * drift_amount * drift_scale * 0.5;
+            bubble_offset.z = cos(current_time * drift_speed * 1.3 + drift_phase) * drift_amount * drift_scale;
+        }
+
+        // Growth mode
+        if (enable_growth_mode)
+        {
+            if (bubble_time < growth_duration)
+            {
+                float gp   = bubble_time / max(growth_duration, 1e-6);
+                float ease = gp * gp * (3.0 - 2.0 * gp);
+                scale_factor = lerp(min_scale, 1.0, ease);
+            }
+            else
+            {
+                scale_factor = 1.0;
+            }
+
+            if (bubble_time > lifetime - pop_duration)
+            {
+                float pop_progress = (lifetime - bubble_time) / max(pop_duration, 1e-6);
+                float pop_ease     = pop_progress * pop_progress;
+                bubble_life        = pop_ease;
+                scale_factor      *= (0.5 + pop_ease * 0.5);
+            }
+        }
+        else
+        {
+            // Fade mode
+            if (bubble_time < fade_in)
+                bubble_life *= bubble_time / max(fade_in, 1e-6);
+
+            if (bubble_time > lifetime - fade_out)
+            {
+                float fp = (lifetime - bubble_time) / max(fade_out, 1e-6);
+                bubble_life *= fp;
+            }
+        }
+    }
+    else
+    {
+        // Static mode - distribute across bbox
+        float rand_x = fit(rand(i * 3 + seed), 0, 1, bbox_min.x, bbox_max.x);
+        float rand_y = fit(rand(i * 5 + seed), 0, 1, bbox_min.y, bbox_max.y);
+        float rand_z = fit(rand(i * 7 + seed), 0, 1, bbox_min.z, bbox_max.z);
+        bubble_center = set(rand_x, rand_y, rand_z);
+    }
+
+    // Random variations
+    float radius_rand = fit(rand(i * 7  + seed), 0, 1, 1.0 - radius_variation, 1.0 + radius_variation);
+    float height_rand = fit(rand(i * 11 + seed), 0, 1, 1.0 - height_variation, 1.0 + height_variation);
+
+    float bubble_radius = base_radius * radius_rand * scale_factor;
+    float bubble_height = base_height * height_rand * bubble_life * scale_factor;
+
+    vector final_center = bubble_center + bubble_offset;
+
+    // Vector from bubble center to this point
+    vector to_point = orig_pos - final_center;
+
+    // Project to_point onto plane perpendicular to orig_normal
+    vector projected = to_point - dot(to_point, orig_normal) * orig_normal;
+    float proj_len = length(projected);
+
+    // Dynamic tangent directions
+    vector tangent1;
+    if (proj_len < 0.001)
+    {
+        if (abs(orig_normal.y) < 0.999)
+            tangent1 = normalize(cross(orig_normal, {0,1,0}));
+        else
+            tangent1 = normalize(cross(orig_normal, {1,0,0}));
+    }
+    else
+    {
+        tangent1 = projected / proj_len;
+    }
+
+    vector tangent2 = normalize(cross(orig_normal, tangent1));
+
+    // Distance in tangent plane
+    float d1 = dot(to_point, tangent1);
+    float d2 = dot(to_point, tangent2);
+    float dist = sqrt(d1*d1 + d2*d2);
+
+    if (dist < bubble_radius)
+    {
+        float norm_dist = dist / max(bubble_radius, 1e-6);
+
+        float t = clamp(pow(norm_dist, falloff), 0.0, 1.0);
+        float smooth_t = t*t*(3.0 - 2.0*t);
+
+        float sphere_factor  = sqrt(max(0.0, 1.0 - norm_dist*norm_dist));
+        float tension_factor = 1.0 - smooth_t;
+
+        float deform = lerp(sphere_factor, tension_factor, surface_tension);
+
+        float displacement = deform * bubble_height;
+
+        float w = deform;
+        total_weight += w;
+        total_displacement += displacement * w;
+
+        // Normal adjustment (tilt toward tangent1)
+        if (dist > 0.001)
+        {
+            float eps = 0.01;
+            float ndp = min(norm_dist + eps, 1.0);
+
+            float tp = clamp(pow(ndp, falloff), 0.0, 1.0);
+            float sp = tp*tp*(3.0 - 2.0*tp);
+
+            float sphere_p  = sqrt(max(0.0, 1.0 - ndp*ndp));
+            float tension_p = 1.0 - sp;
+
+            float deform_p = lerp(sphere_p, tension_p, surface_tension);
+
+            float slope = (deform_p - deform) / max(eps, 1e-6) * bubble_height / max(bubble_radius, 1e-6);
+
+            vector surfN = normalize(orig_normal - tangent1 * slope);
+            blended_normal += surfN * w;
+        }
+    }
+}
+
+// Apply bubble deformation
+if (total_weight > 0.0)
+{
+    @P = orig_pos + orig_normal * (total_displacement / total_weight);
+    @N = normalize(blended_normal);
+}
+else
+{
+    @N = orig_normal;
+}
+
+// =========================
+// RIPPLE EFFECT (UPDATED: N concentric rings visible at once)
+// =========================
+if (enable_ripples && enable_animated)
+{
+    float current_time = @Time;
+
+    int nr = max(num_ripples, 1);
+    float rs = max(ring_spacing, 1e-6);
+
+    // Loop bubbles
+    for (int r = 0; r < num_bubbles; r++)
+    {
+        float time_offset = fit(rand(r * 13 + seed), 0, 1, 0, lifetime);
+        float total_time  = current_time + time_offset;
+
+        int ripple_cycle = int(floor(total_time / lifetime));
+        float bubble_age = total_time - float(ripple_cycle) * lifetime; // 0..lifetime
+
+        // Only emit ripples near the start of the bubble life
+        if (bubble_age < 0.0 || bubble_age >= ripple_duration)
+            continue;
+
+        // Bubble center (same distribution as bubbles)
+        float cx = fit(rand(r * 3 + seed + ripple_cycle * 17), 0, 1, bbox_min.x, bbox_max.x);
+        float cy = fit(rand(r * 5 + seed + ripple_cycle * 17), 0, 1, bbox_min.y, bbox_max.y);
+        float cz = fit(rand(r * 7 + seed + ripple_cycle * 17), 0, 1, bbox_min.z, bbox_max.z);
+
+        // Drift
+        if (enable_drift)
+        {
+            float drift_phase = rand(r * 37 + seed) * 6.28318;
+            float drift_scale = spawn_area * max_size;
+
+            cx += sin(current_time * drift_speed + drift_phase) * drift_amount * drift_scale;
+            cy += sin(current_time * drift_speed * 0.7 + drift_phase + 1.0) * drift_amount * drift_scale * 0.5;
+            cz += cos(current_time * drift_speed * 1.3 + drift_phase) * drift_amount * drift_scale;
+        }
+
+        vector center = set(cx, cy, cz);
+
+        // Distance in the surface plane (use original normal plane)
+        vector v = orig_pos - center;
+        vector proj = v - dot(v, orig_normal) * orig_normal;
+        float d = length(proj);
+
+        // Normalized time 0..1 through ripple burst
+        float tt = clamp(bubble_age / max(ripple_duration, 1e-6), 0.0, 1.0);
+
+        // Expanding "front" position
+        float base_pos = tt * ripple_radius;
+
+        // Ring thickness
+        float ring_width = max(ripple_radius * ripple_width_mul, 1e-6);
+
+        // Fade over time
+        float fade = 1.0 - tt;
+
+        // Add N rings simultaneously: base_pos, base_pos+rs, base_pos+2rs, ...
+        for (int k = 0; k < nr; k++)
+        {
+            float ring_pos = base_pos + float(k) * rs;
+
+            float dist_to_ring = abs(d - ring_pos);
+            if (dist_to_ring >= ring_width) continue;
+
+            float ring_strength = 1.0 - (dist_to_ring / ring_width);
+
+            // Optional: outer rings weaker (controlled)
+            // outer_atten = 0 => no attenuation, 1 => 1/(1+k)
+            float atten = lerp(1.0, 1.0 / (1.0 + float(k)), clamp(outer_atten, 0.0, 1.0));
+
+            float disp =
+                sin(ring_strength * 3.14159) *
+                ripple_height *
+                fade *
+                atten;
+
+            @P += orig_normal * disp;
+        }
+    }
+}
